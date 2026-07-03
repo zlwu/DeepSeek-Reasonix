@@ -25,7 +25,6 @@ import (
 	"reasonix/internal/config"
 
 	lark "github.com/larksuite/oapi-sdk-go/v3"
-	larknormalize "github.com/larksuite/oapi-sdk-go/v3/channel/normalize"
 	larkcore "github.com/larksuite/oapi-sdk-go/v3/core"
 	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher"
 	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher/callback"
@@ -470,34 +469,67 @@ func (a *adapter) handleMessage(msg feishuMsgEvent) {
 	}
 }
 
-// SendText sends one markdown-rendered message to a Feishu/Lark chat_id using the SDK.
+// SendText sends an interactive card with markdown content to a Feishu/Lark chat_id using the SDK.
 // It is used by the desktop settings panel as an actual connection test.
 func SendText(ctx context.Context, cfg config.FeishuBotConfig, chatID, text string) (bot.SendResult, error) {
 	a := &adapter{cfg: cfg, logger: slog.Default().With("platform", "feishu")}
 	return a.sendMessage(ctx, bot.OutboundMessage{ChatID: chatID, Text: text})
 }
 
-// sendMessage 使用飞书/Lark SDK 回复或主动发送消息。
+// sendMessage 使用飞书/Lark SDK 以 Interactive Card (JSON 2.0) 发送消息。
+// Card 内嵌 markdown 元素，支持 CommonMark 标准语法。
+// 当卡片体积超过 30KB 限制（如大段代码），自动降级为纯文本消息。
 func (a *adapter) sendMessage(ctx context.Context, msg bot.OutboundMessage) (bot.SendResult, error) {
 	if msg.Card != nil {
 		return a.sendCard(ctx, msg)
 	}
-	content, err := feishuMarkdownPostContent(msg.Text)
+	cardContent, err := buildMarkdownCard(msg.Text)
 	if err != nil {
-		a.logger.Warn("format feishu markdown failed, falling back to text", "err", err)
-		content = feishuTextContent(msg.Text)
-		return a.sendSDKContent(ctx, msg, larkim.MsgTypeText, content)
+		a.logger.Warn("build markdown card failed, falling back to text", "err", err)
+		return a.sendSDKContent(ctx, msg, larkim.MsgTypeText, feishuTextContent(msg.Text))
 	}
-	return a.sendSDKContent(ctx, msg, larkim.MsgTypePost, content)
+	result, err := a.sendSDKContent(ctx, msg, larkim.MsgTypeInteractive, cardContent)
+	if err != nil && isCardLimitError(err) {
+		a.logger.Warn("card send failed (size limit), retrying as text", "err", err)
+		return a.sendSDKContent(ctx, msg, larkim.MsgTypeText, feishuTextContent(msg.Text))
+	}
+	return result, err
 }
 
-func feishuMarkdownPostContent(text string) (string, error) {
-	return larknormalize.SimpleMarkdownToPost("", text, nil)
+// buildMarkdownCard builds a Feishu Interactive Card JSON 2.0 payload with a markdown element.
+// JSON 2.0 cards support full CommonMark syntax natively.
+func buildMarkdownCard(content string) (string, error) {
+	card := map[string]any{
+		"schema": "2.0",
+		"body": map[string]any{
+			"elements": []map[string]any{
+				{
+					"tag":     "markdown",
+					"content": content,
+				},
+			},
+		},
+	}
+	data, err := json.Marshal(card)
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
 }
 
 func feishuTextContent(text string) string {
 	content, _ := json.Marshal(textContent{Text: text})
 	return string(content)
+}
+
+// isCardLimitError reports whether err is due to a Feishu card size/table limit (code 11310
+// or 11325). See https://open.feishu.cn/document/server-docs/im-v1/message/create_json.
+func isCardLimitError(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	return strings.Contains(s, "11310") || strings.Contains(s, "11325")
 }
 
 func (a *adapter) sdkClient() (*lark.Client, error) {
