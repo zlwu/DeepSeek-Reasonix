@@ -525,27 +525,6 @@ func (a *adapter) sendSDKContent(ctx context.Context, msg bot.OutboundMessage, m
 	if err != nil {
 		return bot.SendResult{}, err
 	}
-	if msg.ReplyToMsgID != "" {
-		req := larkim.NewReplyMessageReqBuilder().
-			MessageId(msg.ReplyToMsgID).
-			Body(larkim.NewReplyMessageReqBodyBuilder().MsgType(msgType).Content(content).Build()).
-			Build()
-		resp, err := client.Im.Message.Reply(ctx, req)
-		if err != nil {
-			return bot.SendResult{}, err
-		}
-		if resp == nil {
-			return bot.SendResult{}, fmt.Errorf("feishu reply error: empty response")
-		}
-		if !resp.Success() {
-			return bot.SendResult{}, fmt.Errorf("feishu reply error: %s", feishuCodeError(resp.Code, resp.Msg))
-		}
-		if resp.Data == nil {
-			return bot.SendResult{}, nil
-		}
-		return bot.SendResult{MessageID: stringPtrValue(resp.Data.MessageId)}, nil
-	}
-
 	chatID := strings.TrimSpace(msg.ChatID)
 	if chatID == "" {
 		return bot.SendResult{}, fmt.Errorf("feishu chat_id is empty")
